@@ -199,39 +199,40 @@
 
 ```text
 Prior_Scripts
-├── Input
-│   ├── 18,983 genes (GENCODE v38)
-│   ├── 500 individuals (1000G EUR)
-│   └── Causal architecture
-│       ├── 4 SNPs/gene
-│       └── h² ~ Beta(2,20)
-│
-├── Step 1: Simulate Expression & Reads
-│   ├── Ground-truth Y matrices (500 × M isoforms per gene)
-│   ├── Causal SNP IDs & effect sizes
-│   └── FASTQ reads (75 bp, 30M reads/sample)
-│
-├── Step 2: Quantify Reads
-│   ├── Salmon (GENCODE v27, v38, v45)
-│   ├── STAR + featureCounts (GENCODE v27, v38, v45)
-│   └── Gene/transcript TPMs & counts
-│
-├── Steps 3–8: QC & Prepare
-│   ├── TMM-normalized expression
-│   └── BED files (QTL-ready phenotypes)
-│
-├── Step 3 [Dev]: eQTL Mapping
-│   ├── SNP–gene associations
-│   └── Comparison across methods/annotations
-│
-├── Step 4 [Dev]: TWAS Model Training
-│   ├── Gene-level weights (R²)
-│   └── Isoform-level weights + correlation structure
-│
-└── Step 5 [Dev]: Colocalization & Power
-    ├── Method concordance
-    ├── Sensitivity/specificity curves
-    └── Power estimates for design studies
+|
++-- Input
+|   +-- 18,983 genes (GENCODE v38)
+|   +-- 500 individuals (1000G EUR)
+|   \-- Causal architecture
+|       +-- 4 SNPs/gene
+|       \-- h² ~ Beta(2,20)
+|
++-- Step 1: Simulate Expression & Reads
+|   +-- Ground-truth Y matrices (500 × M isoforms per gene)
+|   +-- Causal SNP IDs & effect sizes
+|   \-- FASTQ reads (75 bp, 30M reads/sample)
+|
++-- Step 2: Quantify Reads
+|   +-- Salmon (GENCODE v27, v38, v45)
+|   +-- STAR + featureCounts (GENCODE v27, v38, v45)
+|   \-- Gene/transcript TPMs & counts
+|
++-- Steps 3–8: QC & Prepare
+|   +-- TMM-normalized expression
+|   \-- BED files (QTL-ready phenotypes)
+|
++-- Step 3 [Dev]: eQTL Mapping
+|   +-- SNP-gene associations
+|   \-- Comparison across methods/annotations
+|
++-- Step 4 [Dev]: TWAS Model Training
+|   +-- Gene-level weights (R²)
+|   \-- Isoform-level weights + correlation structure
+|
+\-- Step 5 [Dev]: Colocalization & Power
+    +-- Method concordance
+    +-- Sensitivity/specificity curves
+    \-- Power estimates for design studies
 ```
 ---
 
