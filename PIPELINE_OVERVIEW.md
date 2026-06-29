@@ -197,6 +197,7 @@
 
 ## Data Lineage
 
+```text
 Prior_Scripts
 ├── Input
 │   ├── 18,983 genes (GENCODE v38)
@@ -231,7 +232,7 @@ Prior_Scripts
     ├── Method concordance
     ├── Sensitivity/specificity curves
     └── Power estimates for design studies
-
+```
 ---
 
 ## Key Comparisons
