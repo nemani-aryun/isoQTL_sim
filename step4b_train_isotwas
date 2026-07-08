@@ -1,0 +1,230 @@
+#!/usr/bin/env Rscript
+
+####################################################################################
+# Step 4b: Train Isoform-Level TWAS Models
+# Multivariate methods: multi-elastic net, mvsusie, univariate
+# Adapted from your isotwas template code
+####################################################################################
+
+library(data.table)
+library(dplyr)
+library(glmnet)
+library(susieR)
+library(VariantAnnotation)
+library(stringr)
+
+args <- commandArgs(trailingOnly = TRUE)
+param_row_reads <- as.numeric(args[1])
+DIR_PROJECT <- as.character(args[2])
+DIR_GENOTYPES <- as.character(args[3])
+
+cat("========================================\n")
+cat("STEP 4b: Isoform-Level TWAS Training\n")
+cat("========================================\n")
+
+#######################################################################
+# Load Data
+#######################################################################
+
+# Use ground truth annotation (v38)
+annot <- "gencode_v38"
+
+# Load transcript-level quantifications (from tximeta)
+quant_file <- paste0(DIR_PROJECT, "/files_for_analysis/quants/param_row_reads_",
+                     param_row_reads, "_salmon_", annot, "_transcripts.RDS")
+
+cat("Loading transcript quantifications from:", quant_file, "\n")
+se <- readRDS(quant_file)
+
+# Extract isoform-level TPMs
+isoform_tpm <- assay(se, "abundance")  # Or "TMM_log2" if preferred
+isoform_ids <- rownames(se)
+
+# Load gene annotation to map isoforms to genes
+anno_file <- paste0(DIR_PROJECT, "/files_for_analysis/anno_selected_genes.txt")
+anno <- read.table(anno_file, header = TRUE)
+
+# Get unique genes
+genes <- unique(anno$GeneID)
+
+# Load genotypes
+vcf_dir <- paste0(DIR_GENOTYPES, "/files_for_analysis/1KG_vcf")
+
+#######################################################################
+# Helper Functions
+#######################################################################
+
+get_cis_genotypes <- function(gene, anno, vcf_dir, cis_window = 1e6) {
+  
+  gene_row <- anno[anno$GeneID == gene, ][1, ]
+  
+  chr <- as.numeric(gsub("chr", "", gene_row$seqnames))
+  gene_start <- gene_row$start
+  gene_end <- gene_row$end
+  
+  snp_start <- max(gene_start - cis_window, 1)
+  snp_end <- gene_end + cis_window
+  
+  vcf_file <- paste0(vcf_dir, "/genos_1kg_eur_500_snps_maf_0.01_chr", chr, ".vcf.gz")
+  
+  if (!file.exists(vcf_file)) return(NULL)
+  
+  query <- paste0(chr, ":", snp_start, "-", snp_end)
+  system(paste("tabix -h", vcf_file, query, ">", "/tmp/temp_region.vcf"))
+  
+  vcf <- readVcf("/tmp/temp_region.vcf", "hg38")
+  
+  if (nrow(vcf) == 0) return(NULL)
+  
+  geno_mat <- geno(vcf)$GT
+  geno_numeric <- apply(geno_mat, c(1, 2), function(x) {
+    as.numeric(substr(x, 1, 1)) + as.numeric(substr(x, 3, 3))
+  })
+  geno_numeric <- t(geno_numeric)
+  
+  vcf_gr <- rowRanges(vcf)
+  snp_ids <- paste0(seqnames(vcf_gr), "_", start(vcf_gr), "_", 
+                    mcols(vcf_gr)$REF, "_", 
+                    as.character(unlist(mcols(vcf_gr)$ALT)))
+  rownames(geno_numeric) <- snp_ids
+  
+  system("rm /tmp/temp_region.vcf")
+  
+  return(geno_numeric)
+}
+
+# Multivariate elastic net
+multi_enet <- function(X, Y, alpha = 0.5, nfolds = 5) {
+  
+  # Fit elastic net with multiple responses
+  models <- list()
+  weights_matrix <- matrix(0, nrow = nrow(X), ncol = ncol(Y))
+  
+  for (i in 1:ncol(Y)) {
+    model <- cv.glmnet(X, Y[, i], alpha = alpha, nfolds = nfolds,
+                       family = "gaussian", standardize = FALSE)
+    coef_vec <- coef(model, s = "lambda.min")
+    weights_matrix[, i] <- coef_vec[-1, 1]
+  }
+  
+  # Calculate multivariate R²
+  pred <- X %*% weights_matrix
+  ss_res <- sum((Y - pred)^2)
+  ss_tot <- sum((Y - colMeans(Y))^2)
+  r2 <- 1 - (ss_res / ss_tot)
+  
+  return(list(weights = weights_matrix, r2 = r2))
+}
+
+# Univariate approach (baseline)
+univariate_models <- function(X, Y) {
+  
+  weights_matrix <- matrix(0, nrow = nrow(X), ncol = ncol(Y))
+  r2_vec <- numeric(ncol(Y))
+  
+  for (i in 1:ncol(Y)) {
+    model <- cv.glmnet(X, Y[, i], alpha = 0.5, nfolds = 5,
+                       family = "gaussian", standardize = FALSE)
+    coef_vec <- coef(model, s = "lambda.min")
+    weights_matrix[, i] <- coef_vec[-1, 1]
+    
+    pred <- X %*% weights_matrix[, i]
+    ss_res <- sum((Y[, i] - pred)^2)
+    ss_tot <- sum((Y[, i] - mean(Y[, i]))^2)
+    r2_vec[i] <- 1 - (ss_res / ss_tot)
+  }
+  
+  return(list(weights = weights_matrix, r2 = r2_vec))
+}
+
+#######################################################################
+# Main Loop
+#######################################################################
+
+output_dir <- paste0(DIR_PROJECT, "/results/isotwas")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+all_results <- list()
+
+for (g_idx in 1:min(length(genes), 100)) {  # Test on 100 genes first
+  
+  gene <- genes[g_idx]
+  
+  if (g_idx %% 10 == 0) {
+    cat("Training isoTWAS for gene", g_idx, "of", length(genes), "-", gene, "\n")
+  }
+  
+  tryCatch({
+    # Get isoforms for this gene
+    gene_iso <- anno[anno$GeneID == gene, ]$Transcript
+    
+    # Get isoform indices in TPM matrix
+    iso_idx <- which(rownames(isoform_tpm) %in% gene_iso)
+    
+    if (length(iso_idx) < 2) {
+      next  # Skip genes with <2 isoforms
+    }
+    
+    Y_iso <- isoform_tpm[iso_idx, ]
+    Y_iso <- t(Y_iso)  # Samples × isoforms
+    
+    # Filter: keep isoforms expressed >0.1 TPM in ≥75% samples
+    expressed <- colMeans(Y_iso > 0.1) >= 0.75
+    Y_iso <- Y_iso[, expressed]
+    
+    if (ncol(Y_iso) < 2) next
+    
+    # Get cis-SNPs
+    X <- get_cis_genotypes(gene, anno, vcf_dir)
+    
+    if (is.null(X) || nrow(X) < 10) {
+      next
+    }
+    
+    # Standardize
+    X <- scale(X)
+    Y_iso <- scale(Y_iso)
+    
+    # Train multivariate model
+    multi_model <- multi_enet(X, Y_iso)
+    
+    # Train univariate models (baseline)
+    uni_model <- univariate_models(X, Y_iso)
+    
+    # Estimate isoform correlation (Omega)
+    omega <- cor(Y_iso)
+    
+    # Store results
+    all_results[[gene]] <- list(
+      gene = gene,
+      n_isoforms = ncol(Y_iso),
+      multivariate_r2 = multi_model$r2,
+      univariate_r2 = mean(uni_model$r2),
+      weights_multi = multi_model$weights,
+      weights_uni = uni_model$weights,
+      omega = omega,
+      isoform_ids = colnames(Y_iso)
+    )
+    
+  }, error = function(e) {
+    cat("Error for gene", gene, ":", conditionMessage(e), "\n")
+  })
+}
+
+# Save results
+saveRDS(all_results, file = paste0(output_dir, "/isotwas_models.RDS"))
+
+# Summary statistics
+n_genes <- length(all_results)
+multi_r2_vec <- sapply(all_results, function(x) x$multivariate_r2)
+uni_r2_vec <- sapply(all_results, function(x) x$univariate_r2)
+
+cat("\nisoTWAS Training Summary:\n")
+cat("Genes with models:", n_genes, "\n")
+cat("Mean multivariate R²:", format(mean(multi_r2_vec), digits = 4), "\n")
+cat("Mean univariate R²:", format(mean(uni_r2_vec), digits = 4), "\n")
+cat("Improvement (multi vs uni):", format(mean(multi_r2_vec - uni_r2_vec), digits = 4), "\n")
+
+cat("\n========================================\n")
+cat("STEP 4b Complete\n")
+cat("========================================\n")
