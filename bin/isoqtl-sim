@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""isoqtl-sim: run the isoQTL_sim pipeline locally or submit it to LSF.
+
+  isoqtl-sim prepare --config c.yaml      select genes and samples (run this first)
+  isoqtl-sim plan    --config c.yaml      list stages and job counts
+  isoqtl-sim run     --config c.yaml -j 8 run on this machine, skipping finished work
+  isoqtl-sim submit  --config c.yaml      write an LSF script (--execute also submits)
+  isoqtl-sim status  --config c.yaml      show progress per stage
+"""
+import argparse
+import math
+import os
+import shlex
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+RUN_STEP = ROOT / "R" / "run_step.R"
+
+
+@dataclass
+class Stage:
+    name: str
+    count: int          # number of array jobs
+    command: str        # shell command; {i} is the 1-based array index
+    mem_gb: int = 8
+    hours: int = 4
+    cores: int = 1
+
+
+def load_config(path):
+    with open(path) as handle:
+        cfg = yaml.safe_load(handle)
+    cfg["_path"] = str(Path(path).resolve())
+    return cfg
+
+
+def n_lines(path):
+    with open(path) as handle:
+        return sum(1 for _ in handle)
+
+
+# Settings that can change between runs without changing any result.
+NOT_LOCKED = {"_path", "output_dir", "lsf", "threads", "resources"}
+
+
+def lock_path(cfg):
+    return Path(cfg["output_dir"]) / "params" / "config.lock.yaml"
+
+
+def locked_settings(cfg):
+    return {k: v for k, v in cfg.items() if k not in NOT_LOCKED}
+
+
+def check_lock(cfg):
+    """Stop if the config no longer matches the one this output_dir was prepared with.
+
+    Finished jobs are skipped on rerun, so a changed setting would otherwise leave
+    old results in place without any warning.
+    """
+    path = lock_path(cfg)
+    if not path.exists():
+        return
+    with open(path) as handle:
+        old = yaml.safe_load(handle) or {}
+    new = locked_settings(cfg)
+    changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+    if changed:
+        sys.exit(f"These settings changed since `prepare` ran in {cfg['output_dir']}: "
+                 f"{', '.join(changed)}.\nFinished jobs would keep the old settings. "
+                 "Use a new output_dir, or delete this one and run `prepare` again.")
+
+
+def apply_resources(cfg, stages):
+    """Apply `resources:` overrides, keyed by stage name or its first word(s).
+
+    `train: {hours: 24}` applies to train_truth and train_salmon_<annotation>.
+    """
+    for key, values in (cfg.get("resources") or {}).items():
+        unknown = set(values) - {"mem_gb", "hours"}
+        if unknown:
+            sys.exit(f"resources.{key}: unknown setting {', '.join(sorted(unknown))}. "
+                     "Use mem_gb or hours.")
+        matched = [s for s in stages if s.name == key or s.name.startswith(key + "_")]
+        if not matched:
+            print(f"Note: resources.{key} matches no stage in this run.", file=sys.stderr)
+        for stage in matched:
+            for name, value in values.items():
+                setattr(stage, name, int(value))
+    return stages
+
+
+def build_stages(cfg):
+    """Stages in dependency order, based on the config and prepared parameters."""
+    out = Path(cfg["output_dir"])
+    genes_file, samples_file = out / "params" / "genes.tsv", out / "params" / "samples.txt"
+    if not genes_file.exists() or not samples_file.exists():
+        sys.exit("Parameters not found. Run `isoqtl-sim prepare --config ...` first.")
+    check_lock(cfg)
+    n_genes = n_lines(genes_file) - 1
+    n_samples = n_lines(samples_file)
+    chunks = math.ceil(n_genes / cfg["genes_per_job"])
+    threads = cfg.get("threads", 4)
+    conf = shlex.quote(cfg["_path"])
+    r = f"Rscript {shlex.quote(str(RUN_STEP))}"
+    sample_of = f'$(sed -n "{{i}}p" {shlex.quote(str(samples_file))})'
+    q = shlex.quote
+
+    stages = [Stage("simulate", chunks, f"{r} simulate {conf} {{i}}", mem_gb=8, hours=4)]
+    sources = ["truth"]
+
+    if cfg.get("run_reads", False):
+        rd = cfg["reads"]
+        reads_dir = out / "reads"
+        stages.append(Stage("truth_matrix", 1, f"{r} truth_matrix {conf} 1", mem_gb=32, hours=2))
+        stages.append(Stage("reads", n_samples, f"{r} reads {conf} {{i}}", mem_gb=16, hours=6))
+
+        def fastq_args(sample, paired_flags, single_flag):
+            r1 = q(str(reads_dir)) + f'/{sample}_R1.fastq.gz'
+            r2 = q(str(reads_dir)) + f'/{sample}_R2.fastq.gz'
+            if rd.get("paired_end", True):
+                return f"{paired_flags[0]} {r1} {paired_flags[1]} {r2}"
+            return f"{single_flag} {r1}"
+
+        for annot in cfg["quant"].get("salmon", []):
+            ref = cfg["reference"][annot]
+            index_dir = ref.get("salmon_index") or str(out / "salmon_index" / annot)
+            if not ref.get("salmon_index"):
+                stages.append(Stage(
+                    f"salmon_index_{annot}", 1,
+                    f"mkdir -p {q(str(out / 'salmon_index'))} && test -f {q(index_dir)}/info.json || "
+                    f"salmon index -t {q(ref['fasta'])} -i {q(index_dir)} -p {threads}",
+                    mem_gb=32, hours=4, cores=threads))
+            sample = sample_of
+            salmon_out = q(str(out / "salmon" / annot)) + f"/{sample}"
+            stages.append(Stage(
+                f"salmon_{annot}", n_samples,
+                f"salmon quant -i {q(index_dir)} -l A "
+                f"{fastq_args(sample, ('-1', '-2'), '-r')} -o {salmon_out} -p {threads} "
+                "--validateMappings --seqBias",
+                mem_gb=16, hours=4, cores=threads))
+            stages.append(Stage(f"aggregate_salmon_{annot}", 1,
+                                f"{r} aggregate_salmon {conf} 1 {annot}", mem_gb=64, hours=4))
+            sources.append(f"salmon_{annot}")
+
+        star = cfg["quant"].get("star")
+        if star:
+            sample = sample_of
+            star_dir = out / "star"
+            prefix = q(str(star_dir)) + f"/{sample}_"
+            stages.append(Stage(
+                "star", n_samples,
+                f"mkdir -p {q(str(star_dir))} && rm -rf {prefix}STARtmp && "
+                f"STAR --genomeDir {q(star['index'])} "
+                f"--readFilesIn {fastq_args(sample, ('', ''), '')} "
+                f"--runThreadN {threads} --readFilesCommand zcat --genomeLoad NoSharedMemory "
+                "--outFilterMultimapNmax 20 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 "
+                "--outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04 "
+                "--alignIntronMin 20 --alignIntronMax 1000000 --alignMatesGapMax 1000000 "
+                "--outSAMunmapped Within --outFilterType BySJout "
+                "--outSAMattributes NH HI AS NM MD --outSAMtype BAM SortedByCoordinate "
+                f"--sjdbScore 1 --outFileNamePrefix {prefix} --limitBAMsortRAM 60000000000 && "
+                f"samtools index {prefix}Aligned.sortedByCoord.out.bam",
+                mem_gb=64, hours=8, cores=threads))
+            for annot in star.get("annotations", []):
+                stages.append(Stage(f"featurecounts_{annot}", 1,
+                                    f"{r} featurecounts {conf} 1 {annot}",
+                                    mem_gb=32, hours=8, cores=threads))
+                sources.append(f"star_{annot}")
+
+        if cfg["quant"].get("fastqc", False):
+            sample = sample_of
+            qc = q(str(out / "fastqc"))
+            fq = f"{q(str(reads_dir))}/{sample}_R1.fastq.gz"
+            if rd.get("paired_end", True):
+                fq += f" {q(str(reads_dir))}/{sample}_R2.fastq.gz"
+            stages.append(Stage("fastqc", n_samples, f"mkdir -p {qc} && fastqc -o {qc} {fq}",
+                                mem_gb=4, hours=2))
+            stages.append(Stage("multiqc", 1, f"cd {qc} && multiqc -f .", mem_gb=8, hours=1))
+
+    for source in sources:
+        stages.append(Stage(f"train_{source}", chunks,
+                            f"{r} train_test {conf} {{i}} {source}", mem_gb=16, hours=12))
+    stages.append(Stage("summarize", 1, f"{r} summarize {conf} 1", mem_gb=16, hours=1))
+    return apply_resources(cfg, stages)
+
+
+def marker(cfg, stage, i):
+    return Path(cfg["output_dir"]) / ".done" / stage.name / str(i)
+
+
+def wrapped(cfg, stage):
+    """Shell command for one array task that records success in a marker file."""
+    mark = shlex.quote(str(Path(cfg["output_dir"]) / ".done" / stage.name))
+    # Keep R's linear algebra to the cores this job asked for, on shared nodes.
+    threads = f"export OMP_NUM_THREADS={stage.cores} OPENBLAS_NUM_THREADS={stage.cores}"
+    return (f'set -euo pipefail; {threads}; if [ ! -f {mark}/{{i}} ]; then {stage.command}; '
+            f'mkdir -p {mark}; touch {mark}/{{i}}; fi')
+
+
+def run_task(cfg, stage, i):
+    if marker(cfg, stage, i).exists():
+        return True
+    log = Path(cfg["output_dir"]) / "logs" / stage.name / f"{i}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    cmd = wrapped(cfg, stage).replace("{i}", str(i))
+    with open(log, "w") as handle:
+        ok = subprocess.run(["bash", "-c", cmd], stdout=handle, stderr=subprocess.STDOUT).returncode == 0
+    if not ok:
+        print(f"  FAILED {stage.name}[{i}]: see {log}", file=sys.stderr)
+    return ok
+
+
+def cmd_prepare(cfg, _):
+    check_lock(cfg)
+    subprocess.run(["Rscript", str(RUN_STEP), "prepare", cfg["_path"]], check=True)
+    with open(lock_path(cfg), "w") as handle:
+        yaml.safe_dump(locked_settings(cfg), handle)
+
+
+def cmd_plan(cfg, _):
+    for s in build_stages(cfg):
+        print(f"{s.name:<34} jobs={s.count:<6} mem={s.mem_gb}G hours={s.hours} cores={s.cores}")
+
+
+def cmd_run(cfg, args):
+    for stage in build_stages(cfg):
+        print(f"[{stage.name}] {stage.count} job(s)", flush=True)
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            results = list(pool.map(lambda i: run_task(cfg, stage, i), range(1, stage.count + 1)))
+        if not all(results):
+            sys.exit(f"Stopped: {results.count(False)} job(s) failed in {stage.name}. "
+                     "Fix the cause and rerun; finished jobs are skipped.")
+    print("Pipeline complete.")
+
+
+def cmd_status(cfg, _):
+    for s in build_stages(cfg):
+        done = sum(marker(cfg, s, i).exists() for i in range(1, s.count + 1))
+        print(f"{s.name:<34} {done}/{s.count}")
+
+
+def cmd_submit(cfg, args):
+    """Write one bsub array per stage, each waiting for the previous stage."""
+    lsf = cfg.get("lsf", {})
+    out = Path(cfg["output_dir"])
+    tag = lsf.get("job_prefix", "isoqtl")
+    prefix = lsf.get("container_exec", "")
+    lines = ["#!/bin/bash", "set -euo pipefail", ""]
+    previous = None
+    stages = build_stages(cfg)
+    limit = lsf.get("max_array_size", 1000)
+    for s in stages:
+        if s.count > limit:
+            n_genes = n_lines(out / "params" / "genes.tsv") - 1
+            per_gene = s.name == "simulate" or s.name.startswith("train_")
+            fix = (f"Raise genes_per_job to at least {math.ceil(n_genes / limit)}, or raise"
+                   if per_gene else "This stage runs one job per sample. Raise")
+            sys.exit(f"Stage {s.name} needs {s.count} array jobs, above the limit of {limit} "
+                     f"(lsf.max_array_size).\n{fix} lsf.max_array_size if your cluster "
+                     "allows larger arrays (MAX_JOB_ARRAY_SIZE in `bparams -a`).")
+    # LSF counts memory in GB on some clusters and MB or KB on others.
+    mem_per_gb = lsf.get("mem_per_gb", 1)
+    for s in stages:
+        job = f"{tag}_{s.name}"
+        (out / "logs" / s.name).mkdir(parents=True, exist_ok=True)
+        task = wrapped(cfg, s).replace("{i}", "${LSB_JOBINDEX}")
+        inner = f"{prefix} bash -c {shlex.quote(task)}".strip()
+        span = f"[1-{s.count}]"
+        if lsf.get("max_running"):
+            span += f"%{lsf['max_running']}"
+        queue = lsf.get("queue_long" if s.hours > lsf.get("short_hours", 3) else "queue_short",
+                        lsf.get("queue", "medium"))
+        opts = [f"-J {shlex.quote(job + span)}", f"-q {queue}", f"-n {s.cores}",
+                f"-W {s.hours}:00", f"-M {s.mem_gb * mem_per_gb}",
+                f'-R "rusage[mem={s.mem_gb * mem_per_gb}] span[hosts=1]"',
+                f"-o {shlex.quote(str(out / 'logs' / s.name))}/%I.log"]
+        if previous:
+            opts.append(f"-w {shlex.quote(f'done({previous})')}")
+        lines.append(f"bsub {' '.join(opts)} {shlex.quote(inner)}")
+        previous = job
+    script = out / "submit_lsf.sh"
+    script.write_text("\n".join(lines) + "\n")
+    script.chmod(0o755)
+    print(f"Wrote {script}")
+    if args.execute:
+        subprocess.run(["bash", str(script)], check=True)
+    else:
+        print("Review it, then run it with bash, or rerun with --execute.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("prepare", "plan", "run", "submit", "status"):
+        p = sub.add_parser(name)
+        p.add_argument("--config", required=True)
+        if name == "run":
+            p.add_argument("-j", "--jobs", type=int, default=1, help="parallel jobs")
+        if name == "submit":
+            p.add_argument("--execute", action="store_true", help="submit immediately")
+    args = parser.parse_args()
+    cfg = load_config(args.config)
+    {"prepare": cmd_prepare, "plan": cmd_plan, "run": cmd_run,
+     "submit": cmd_submit, "status": cmd_status}[args.command](cfg, args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,60 @@
+# Solved for linux-64 on 2026-11-04. QTLtools is omitted: it has no installable
+# conda package for this environment, and no pipeline step uses it yet.
+name: base
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - r-base=4.3
+  # Pipeline CLI and benchmark
+  - pyyaml
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - pandas-plink
+  - glimix-core
+  - numpy-sugar
+  # Command-line tools
+  - htslib
+  - samtools
+  - plink2
+  - salmon
+  - star
+  - fastqc
+  - multiqc
+  # R packages
+  - r-data.table
+  - r-r.utils
+  - r-mass
+  - r-corpcor
+  - r-yaml
+  - r-glmnet
+  - r-rrblup
+  - r-susier
+  - bioconductor-rsubread
+  - bioconductor-edger
+  - bioconductor-tximport
+  # Dependencies of isotwas. isotwas itself, condMVNorm, palasso, cornet, joinet, RMTL
+  # and ACAT have no conda package: tools/install_r_source_packages.sh installs them.
+  - r-boot
+  - r-bigsnpr
+  - r-caret
+  - r-doparallel
+  - r-estimatr
+  - r-foreach
+  - r-huge
+  - r-matrix
+  - r-mvtnorm
+  - r-pbapply
+  - r-pls
+  - r-psych
+  - r-rlist
+  - r-spls
+  - r-survival
+  - r-tibble
+  - bioconductor-biocgenerics
+  - bioconductor-genomicranges
+  - bioconductor-rtracklayer
+  - bioconductor-s4vectors

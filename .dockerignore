@@ -1,0 +1,8 @@
+*
+!environment.yml
+!R
+!bin
+!tests
+!benchmark
+!config
+!tools

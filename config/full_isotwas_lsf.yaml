@@ -1,0 +1,72 @@
+# Full run on simulated expression with isoTWAS models: every protein-coding
+# autosomal gene. Run config/isotwas_pilot_lsf.yaml first and check its run times.
+# Replace every CHANGE_ME. Paths are the lab's; confirm them on the cluster.
+
+output_dir: /rsrch5/scratch/epi/CHANGE_ME/isoqtl_pilot/results_full_isotwas
+seed: 1
+genes_per_job: 20         # about 19,000 genes gives about 950 array jobs per stage
+threads: 4
+run_reads: false
+truth_annotation: gencode_v38
+
+reference:
+  gencode_v38:
+    gtf: /rsrch5/home/epi/bhattacharya_lab/data/GenomicReferences/txome/gencode_v38/gencode.v38.annotation.gtf
+    fasta: /rsrch5/home/epi/bhattacharya_lab/data/GenomicReferences/txome/gencode_v38/gencode.v38.transcripts.fa
+
+genotypes:
+  vcf_template: /rsrch9/home/epi/bhattacharya_lab/users/sthead/GTEx_gencode_comp/pass1/files_for_analysis/1KG_vcf/genos_1kg_eur_500_snps_maf_0.01_chr{chr}.vcf.gz
+  chr_prefix: ""          # use the value that worked in the pilot
+
+windows:
+  causal: 250000
+  train: 1000000
+
+simulation:
+  n_genes: all
+  n_causal: 4
+  prop_shared: [0.5, 0.75, 1]
+  h2_g: {beta: [2, 20]}
+  cov_B: [0.7, 0.9]
+  cov_E: [0, 0.5]
+
+# Power depends on n_gwas * h2ge: the expected TWAS Z is sqrt(n_gwas * h2ge) times the
+# correlation between predicted and true genetic expression. These give expected Z of
+# about 3.2, 5, 7.1 and 10 for a perfectly predicted gene, against a Bonferroni
+# threshold near 4.7 for 19,000 genes. Extra scenarios add almost no compute.
+trait:
+  scenarios:
+    - {name: "null",        h2ge: 0,       n_gwas: 100000, mediator: gene}
+    - {name: gene_1e-4,     h2ge: 0.0001,  n_gwas: 100000, mediator: gene}
+    - {name: gene_2.5e-4,   h2ge: 0.00025, n_gwas: 100000, mediator: gene}
+    - {name: gene_5e-4,     h2ge: 0.0005,  n_gwas: 100000, mediator: gene}
+    - {name: gene_1e-3,     h2ge: 0.001,   n_gwas: 100000, mediator: gene}
+    - {name: isoform_1e-4,   h2ge: 0.0001,  n_gwas: 100000, mediator: isoform}
+    - {name: isoform_2.5e-4, h2ge: 0.00025, n_gwas: 100000, mediator: isoform}
+    - {name: isoform_5e-4,   h2ge: 0.0005,  n_gwas: 100000, mediator: isoform}
+    - {name: isoform_1e-3,   h2ge: 0.001,   n_gwas: 100000, mediator: isoform}
+
+reads: {read_length: 75, library_size: 30000000, paired_end: true}
+quant: {salmon: [gencode_v38], min_prop_expressed: 0.75, fastqc: false}
+models:
+  methods: [enet, blup, susie]   # univariate models for the gene and for each isoform
+  # isoTWAS models: all isoforms of a gene trained jointly, best method per isoform.
+  # graph_reg is left out because it needs an isoform similarity matrix.
+  isotwas:
+    methods: [multi_enet, mrce_lasso, joinet, spls, sgl, mtlasso, stacking, univariate]
+    omega_est: mean              # there are no replicate quantifications to use
+summary: {alpha: 0.05}
+
+# Optional per-stage limits, by stage name or its first word. Defaults are in `plan`.
+resources:
+  train: {hours: 24}
+
+lsf:
+  job_prefix: isoqtl_isofull
+  queue_short: short
+  queue_long: medium
+  short_hours: 3
+  max_running: 200
+  max_array_size: 1000    # LSF's default limit on array size
+  mem_per_gb: 1           # use 1024 on clusters where LSF counts memory in MB
+  container_exec: /risapps/rhel8/miniforge3/24.5.0-0/bin/conda run --no-capture-output -p /rsrch5/scratch/epi/CHANGE_ME/isoqtl_pilot/env_isotwas
