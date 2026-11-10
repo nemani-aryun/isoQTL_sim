@@ -32,7 +32,7 @@ You need **one** of these:
   Windows with WSL). macOS without Docker is not supported, because some R packages
   have no conda build for Apple silicon.
 - An LSF cluster. If its nodes have no internet access, see
-  [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) after step 2.
+  [CLUSTER_SETUP.md](CLUSTER_SETUP.md) after step 2.
 
 Disk: 5 GB for the software, 2 GB for the annotation, and a few GB for filtered
 genotypes (the raw 1000 Genomes download is tens of GB; you can delete it after
@@ -151,7 +151,7 @@ plink2 --version | head -1
 Compute nodes often cannot download anything. `tools/make_offline_bundle.sh` runs on
 a machine with internet access (a laptop is fine) and produces a folder with every
 package; you copy it to the cluster and install from it offline.
-[docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) has the steps, including how to test
+[CLUSTER_SETUP.md](CLUSTER_SETUP.md) has the steps, including how to test
 and how to submit. Follow its sections 1–3, then come back to step 5 here for the
 data.
 
@@ -277,7 +277,7 @@ Change these five lines (and only these, for a first run):
 
 Write paths out in full; `$ISOQTL_HOME` and `~` are not expanded inside the file.
 Leave `n_genes: 100` and `run_reads: false` for the first run. Every other setting is
-explained in [docs/CONFIG.md](docs/CONFIG.md).
+explained in [CONFIG.md](CONFIG.md).
 
 Now let the pipeline read the annotation, pick 100 genes at random and list the
 samples. This also checks that the files can be opened (1–3 minutes):
@@ -352,7 +352,7 @@ the software environment (for option B: `conda run --no-capture-output -p
 /full/path/to/isoQTL_sim/env`). Jobs that fail leave later stages pending; read the
 log in `results/my_run/logs/<stage>/<index>.log`, kill the pending jobs with
 `bkill -J "isoqtl_*"`, fix the cause, and run the `bash` line again. See
-[docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) for the details.
+[CLUSTER_SETUP.md](CLUSTER_SETUP.md) for the details.
 
 ## 8. Read the results
 
@@ -400,7 +400,7 @@ then edit what you like. Changing `threads`, `resources` or the `lsf` block is
 always allowed.
 
 Common next steps, each a few lines in the config
-([docs/CONFIG.md](docs/CONFIG.md) has the details):
+([CONFIG.md](CONFIG.md) has the details):
 
 - **More scenarios**: add rows under `trait.scenarios` with other `h2ge`, `n_gwas`
   or `mediator` values. Each adds one GWAS per gene and one test per model; cheap.

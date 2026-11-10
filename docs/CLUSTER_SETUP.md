@@ -4,7 +4,7 @@
 stage starts when the previous one has finished. This guide covers what is specific
 to a cluster: installing the software where compute nodes may have no internet
 access, the `lsf` block of the config, submitting, watching, recovering from failed
-jobs, and scaling to every gene. Read [GETTING_STARTED.md](../GETTING_STARTED.md)
+jobs, and scaling to every gene. Read [GETTING_STARTED.md](GETTING_STARTED.md)
 first for the data and the config; this page assumes you have both.
 
 Replace `CONDA_BIN` below with your cluster's conda or mamba executable

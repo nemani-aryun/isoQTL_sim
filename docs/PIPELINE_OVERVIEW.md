@@ -2,7 +2,7 @@
 
 This describes what each stage computes, the statistical model, and where the
 outputs go. For running it, see [GETTING_STARTED.md](GETTING_STARTED.md); for each
-setting, [docs/CONFIG.md](docs/CONFIG.md).
+setting, [CONFIG.md](CONFIG.md).
 
 ## The idea
 

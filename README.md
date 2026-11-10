@@ -54,7 +54,7 @@ A per-gene table (`gene_tests.tsv.gz`) sits beside it.
 
 Each stage is a job array that skips work already finished, so a run can be
 stopped and resumed, and runs on one machine (`isoqtl-sim run`) or an LSF cluster
-(`isoqtl-sim submit`). [PIPELINE_OVERVIEW.md](PIPELINE_OVERVIEW.md) has the details
+(`isoqtl-sim submit`). [docs/PIPELINE_OVERVIEW.md](docs/PIPELINE_OVERVIEW.md) has the details
 and the statistical model.
 
 ## What you need
@@ -68,7 +68,7 @@ and the statistical model.
 
 ## Install and run in 15 minutes
 
-[GETTING_STARTED.md](GETTING_STARTED.md) walks through every step with the exact
+[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through every step with the exact
 commands and what you should see after each. In short:
 
 ```bash
@@ -100,13 +100,27 @@ stage and chains them. For a cluster without internet access,
 `tools/make_offline_bundle.sh` builds an installable package on a machine that has
 it; [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) covers both.
 
+## Repository layout
+
+```
+bin/isoqtl-sim        the command: prepare, plan, run, submit, status
+R/                    pipeline steps (run_step.R) and the simulation model (sim_core.R)
+config/               example configurations to copy from
+docs/                 guides and the configuration reference
+tests/                unit tests and the synthetic end-to-end test
+tools/                offline bundle builder and source-package installer
+benchmark/            comparison against twas_sim
+legacy/               the original per-step scripts, kept for reference only
+Dockerfile, environment.yml   the software environment
+```
+
 ## Documentation
 
 | Document | Read it when |
 |---|---|
-| [GETTING_STARTED.md](GETTING_STARTED.md) | You are running isoQTL_sim for the first time |
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | You are running isoQTL_sim for the first time |
 | [docs/CONFIG.md](docs/CONFIG.md) | You want to know what a setting does, or change the simulation |
-| [PIPELINE_OVERVIEW.md](PIPELINE_OVERVIEW.md) | You want to know what each stage computes, the model, and the output files |
+| [docs/PIPELINE_OVERVIEW.md](docs/PIPELINE_OVERVIEW.md) | You want to know what each stage computes, the model, and the output files |
 | [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) | You are running on an LSF cluster, with or without internet access on its nodes |
 
 ## What has been tested
