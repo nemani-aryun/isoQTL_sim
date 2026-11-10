@@ -98,7 +98,7 @@ column -t -s $'\t' results/my_run/summary/power_summary.tsv
 On an LSF cluster, replace `run` with `submit`, which writes one `bsub` job array per
 stage and chains them. For a cluster without internet access,
 `tools/make_offline_bundle.sh` builds an installable package on a machine that has
-it; [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) is a worked example of that route.
+it; [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) covers both.
 
 ## Documentation
 
@@ -107,7 +107,7 @@ it; [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) is a worked example of that r
 | [GETTING_STARTED.md](GETTING_STARTED.md) | You are running isoQTL_sim for the first time |
 | [docs/CONFIG.md](docs/CONFIG.md) | You want to know what a setting does, or change the simulation |
 | [PIPELINE_OVERVIEW.md](PIPELINE_OVERVIEW.md) | You want to know what each stage computes, the model, and the output files |
-| [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) | You are installing on an LSF cluster, especially one without internet access |
+| [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) | You are running on an LSF cluster, with or without internet access on its nodes |
 
 ## What has been tested
 

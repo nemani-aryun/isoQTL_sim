@@ -1,0 +1,80 @@
+# Read-level pilot on an LSF cluster: 100 genes, simulated RNA-seq reads for every
+# sample, Salmon quantification, then the same TWAS comparison on true and estimated
+# expression. The summary has `truth` rows and `salmon_gencode_v38` rows; the gap is
+# what quantification costs.
+# Replace every /path/to/... and the lsf block. All settings: docs/CONFIG.md.
+
+output_dir: /path/to/results/reads_pilot
+seed: 1
+genes_per_job: 15
+threads: 4
+run_reads: true
+truth_annotation: gencode_v38
+
+reference:
+  gencode_v38:
+    gtf: /path/to/gencode.v38.annotation.gtf
+    fasta: /path/to/gencode.v38.transcripts.fa
+    # salmon_index: /path/to/salmon_index   # optional; without it the pipeline builds one
+  # A second annotation here, listed under quant.salmon, measures annotation mismatch:
+  # gencode_v45:
+  #   gtf: /path/to/gencode.v45.annotation.gtf
+  #   fasta: /path/to/gencode.v45.transcripts.fa
+
+genotypes:
+  vcf_template: /path/to/genotypes_chr{chr}.vcf.gz
+  chr_prefix: ""
+  # n_samples: 100        # optional: a random subset of the VCF's samples
+
+windows:
+  causal: 250000
+  train: 1000000
+
+simulation:
+  n_genes: 100
+  n_causal: 4
+  prop_shared: [0.5, 0.75, 1]
+  h2_g: {beta: [2, 20]}
+  cov_B: [0.7, 0.9]
+  cov_E: [0, 0.5]
+
+trait:
+  scenarios:
+    - {name: "null",         h2ge: 0,       n_gwas: 100000, mediator: gene}
+    - {name: gene_1e-4,      h2ge: 0.0001,  n_gwas: 100000, mediator: gene}
+    - {name: gene_2.5e-4,    h2ge: 0.00025, n_gwas: 100000, mediator: gene}
+    - {name: gene_5e-4,      h2ge: 0.0005,  n_gwas: 100000, mediator: gene}
+    - {name: gene_1e-3,      h2ge: 0.001,   n_gwas: 100000, mediator: gene}
+    - {name: isoform_1e-4,   h2ge: 0.0001,  n_gwas: 100000, mediator: isoform}
+    - {name: isoform_2.5e-4, h2ge: 0.00025, n_gwas: 100000, mediator: isoform}
+    - {name: isoform_5e-4,   h2ge: 0.0005,  n_gwas: 100000, mediator: isoform}
+    - {name: isoform_1e-3,   h2ge: 0.001,   n_gwas: 100000, mediator: isoform}
+
+# Only the simulated genes are expressed, so every read comes from them. 150,000 read
+# pairs over 100 genes matches the depth per gene of 30 million over all genes.
+reads: {read_length: 75, library_size: 150000, paired_end: true}
+
+quant:
+  salmon: [gencode_v38]
+  min_prop_expressed: 0.75
+  fastqc: false
+  # STAR and featureCounts are wired in but have not been tested anywhere:
+  # star:
+  #   index: /path/to/star_index
+  #   annotations: [gencode_v38]
+
+models: {methods: [enet, blup, susie]}
+summary: {alpha: 0.05}
+
+# resources:
+#   salmon_gencode_v38: {hours: 8, mem_gb: 24}
+
+lsf:
+  job_prefix: isoqtl_reads
+  queue_short: short
+  queue_long: medium
+  short_hours: 3
+  max_running: 200
+  max_array_size: 1000
+  mem_per_gb: 1
+  container_exec: /path/to/conda run --no-capture-output -p /path/to/isoQTL_sim/env

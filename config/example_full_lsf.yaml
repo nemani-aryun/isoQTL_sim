@@ -1,0 +1,68 @@
+# Every protein-coding autosomal gene, nine trait scenarios, univariate and isoTWAS
+# models, on an LSF cluster. About 950 jobs per stage and 4,600 CPU-hours.
+# Replace every /path/to/... and the lsf block, then: isoqtl-sim prepare --config ...
+# All settings are explained in docs/CONFIG.md.
+
+output_dir: /path/to/results/full_run
+seed: 1
+genes_per_job: 20         # about 19,000 genes gives about 950 array jobs per stage
+threads: 4
+run_reads: false
+truth_annotation: gencode_v38
+
+reference:
+  gencode_v38:
+    gtf: /path/to/gencode.v38.annotation.gtf
+    fasta: /path/to/gencode.v38.transcripts.fa
+
+genotypes:
+  vcf_template: /path/to/genotypes_chr{chr}.vcf.gz
+  chr_prefix: ""
+
+windows:
+  causal: 250000
+  train: 1000000
+
+simulation:
+  n_genes: all
+  n_causal: 4
+  prop_shared: [0.5, 0.75, 1]
+  h2_g: {beta: [2, 20]}
+  cov_B: [0.7, 0.9]
+  cov_E: [0, 0.5]
+
+trait:
+  scenarios:
+    - {name: "null",         h2ge: 0,       n_gwas: 100000, mediator: gene}
+    - {name: gene_1e-4,      h2ge: 0.0001,  n_gwas: 100000, mediator: gene}
+    - {name: gene_2.5e-4,    h2ge: 0.00025, n_gwas: 100000, mediator: gene}
+    - {name: gene_5e-4,      h2ge: 0.0005,  n_gwas: 100000, mediator: gene}
+    - {name: gene_1e-3,      h2ge: 0.001,   n_gwas: 100000, mediator: gene}
+    - {name: isoform_1e-4,   h2ge: 0.0001,  n_gwas: 100000, mediator: isoform}
+    - {name: isoform_2.5e-4, h2ge: 0.00025, n_gwas: 100000, mediator: isoform}
+    - {name: isoform_5e-4,   h2ge: 0.0005,  n_gwas: 100000, mediator: isoform}
+    - {name: isoform_1e-3,   h2ge: 0.001,   n_gwas: 100000, mediator: isoform}
+
+reads: {read_length: 75, library_size: 30000000, paired_end: true}
+quant: {salmon: [gencode_v38], min_prop_expressed: 0.75, fastqc: false}
+
+models:
+  methods: [enet, blup, susie]
+  isotwas:                # remove this block for univariate models only (4x faster)
+    methods: [multi_enet, mrce_lasso, joinet, spls, sgl, mtlasso, stacking, univariate]
+    omega_est: mean
+
+summary: {alpha: 0.05}
+
+resources:
+  train: {hours: 24}      # the longest 20-gene job with isoTWAS took about 11 hours
+
+lsf:
+  job_prefix: isoqtl_full
+  queue_short: short
+  queue_long: medium      # must allow 24 hours: bqueues -l medium | grep -A2 RUNLIMIT
+  short_hours: 3
+  max_running: 200
+  max_array_size: 1000
+  mem_per_gb: 1
+  container_exec: /path/to/conda run --no-capture-output -p /path/to/isoQTL_sim/env

@@ -151,9 +151,9 @@ plink2 --version | head -1
 Compute nodes often cannot download anything. `tools/make_offline_bundle.sh` runs on
 a machine with internet access (a laptop is fine) and produces a folder with every
 package; you copy it to the cluster and install from it offline.
-[docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) is a complete worked example on one
-such cluster, including how to test and how to submit. Follow it, then come back to
-step 5 here for the data.
+[docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) has the steps, including how to test
+and how to submit. Follow its sections 1–3, then come back to step 5 here for the
+data.
 
 ## 4. Run the built-in test
 
@@ -352,7 +352,7 @@ the software environment (for option B: `conda run --no-capture-output -p
 /full/path/to/isoQTL_sim/env`). Jobs that fail leave later stages pending; read the
 log in `results/my_run/logs/<stage>/<index>.log`, kill the pending jobs with
 `bkill -J "isoqtl_*"`, fix the cause, and run the `bash` line again. See
-[docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) for a complete worked example.
+[docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) for the details.
 
 ## 8. Read the results
 

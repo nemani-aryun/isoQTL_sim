@@ -1,465 +1,230 @@
-# Setting up isoQTL_sim on the LSF cluster
+# Running on an LSF cluster
 
-> **Who this is for.** This is the worked, step-by-step record of installing and
-> running isoQTL_sim on one LSF cluster (MD Anderson's) whose nodes have no internet
-> access, written for the person running it there. Queue names, the conda path and
-> the data paths are that cluster's; replace them with yours. The generic
-> instructions are in [../GETTING_STARTED.md](../GETTING_STARTED.md), and every
-> setting is explained in [CONFIG.md](CONFIG.md). The route that matters for other
-> clusters without internet is step 3 (build a bundle elsewhere, install offline)
-> and step 11 (the same for the environment with isoTWAS).
+`isoqtl-sim submit` turns a run into one LSF job array per stage, chained so each
+stage starts when the previous one has finished. This guide covers what is specific
+to a cluster: installing the software where compute nodes may have no internet
+access, the `lsf` block of the config, submitting, watching, recovering from failed
+jobs, and scaling to every gene. Read [GETTING_STARTED.md](../GETTING_STARTED.md)
+first for the data and the config; this page assumes you have both.
 
-This guide creates a conda environment on the cluster, tests it, then runs a
-100-gene pilot (steps 1 to 7), the full run on simulated expression (step 9) and a
-read-level pilot (step 10). Allow about an hour for steps 1 to 5, most of it waiting
-for installs and the queue.
-
-**What's been tested so far.**
-
-- The 100-gene pilot on simulated expression ran on the cluster (steps 1 to 7).
-- Read simulation, Salmon and the TWAS on Salmon estimates have run on a Mac only:
-  on synthetic data, and on the real GENCODE v38 reference with synthetic genotypes.
-  Step 10 is their first run on the cluster.
-- isoTWAS model training (step 11) has run on a Mac only, on synthetic data and on the
-  real GENCODE v38 reference with synthetic genotypes. Its environment has been solved
-  for Linux but never installed there, so step 11 is the first test of both.
-- STAR and featureCounts haven't been run anywhere yet, and no config here uses them.
-
-**Paths and names to check.** The conda path, queue names and data paths come from the
-lab's existing scripts. If one fails, step 2 shows how to look up the right value.
-
-## 1. Copy the code to the cluster
-
-The new code is on a local branch that hasn't been pushed. Run this **on your Mac**,
-replacing `USER` and `CLUSTER_LOGIN_HOST`:
+Replace `CONDA_BIN` below with your cluster's conda or mamba executable
+(`which conda`, or `module avail conda` / `module avail miniforge` and the module's
+path), and set `ISOQTL_HOME` to a directory on fast shared storage with enough quota
+(usually a scratch filesystem, not your home directory):
 
 ```bash
-cd ~/Library/CloudStorage/OneDrive-InsideMDAnderson/isoQTL_sim
-ssh USER@CLUSTER_LOGIN_HOST 'mkdir -p /rsrch5/scratch/epi/USER/isoqtl_pilot'
-rsync -av --exclude .git ./ USER@CLUSTER_LOGIN_HOST:/rsrch5/scratch/epi/USER/isoqtl_pilot/code/
+export ISOQTL_HOME=/scratch/$USER/isoqtl
+export CONDA_BIN=/path/to/conda
+mkdir -p "$ISOQTL_HOME" && cd "$ISOQTL_HOME"
+git clone https://github.com/nemani-aryun/isoQTL_sim.git
 ```
 
-Scratch may be purged on a schedule, so don't leave the only copy of anything there.
+Put the two `export` lines in your `~/.bashrc`, or type them in every new login.
 
-**If rsync is blocked,** use an SFTP client such as FileZilla wherever this guide says
-`rsync`. Set Transfer > Transfer type to Binary. For the code, upload the folders `R`,
-`bin`, `config`, `tests`, `tools` and `docs` into `isoqtl_pilot/code/` and choose
-Overwrite. For a bundle, upload the whole folder; its installer checks every file and
-names any that arrived incomplete.
+## 1. Install the software environment
 
-## 2. Log in and check the cluster matches
+Do the install inside an interactive job, since login nodes often limit CPU and
+memory. Conda caches packages in your home directory by default, which can exceed a
+quota, so point the cache at `ISOQTL_HOME` too:
 
 ```bash
-ssh USER@CLUSTER_LOGIN_HOST
-export PILOT=/rsrch5/scratch/epi/$USER/isoqtl_pilot
-export CONDA_BIN=/risapps/rhel8/miniforge3/24.5.0-0/bin/conda
-
-ls -l "$CONDA_BIN"                 # conda path from the lab's scripts
-bqueues                            # available queues and their time limits
-df -h /rsrch5/scratch              # free space
+bsub -Is -q short -n 4 -W 2:00 -M 16 -R "rusage[mem=16]" bash
+export ISOQTL_HOME=/scratch/$USER/isoqtl CONDA_BIN=/path/to/conda   # if not carried over
+export CONDA_PKGS_DIRS=$ISOQTL_HOME/conda_pkgs
+cd "$ISOQTL_HOME/isoQTL_sim"
 ```
 
-If the conda path is missing, run `module avail conda` or `module avail miniforge` and
-use what you find.
+(Queue names and limits vary; `bqueues` lists yours. `-M` is memory in GB on some
+clusters and MB on others; `bqueues -l short` shows the units with the limits.)
 
-## 3. Create the environment
-
-Interactive nodes can't reach the web, so the packages are downloaded on a Mac first
-and installed offline on the cluster.
-
-**On your Mac,** copy the bundle (about 900 MB). To build a new one, for example after
-`environment.yml` changes, run `tools/make_offline_bundle.sh` on a machine with web access.
+### If compute nodes can reach the internet
 
 ```bash
-rsync -av BUNDLE_DIR/ USER@CLUSTER_LOGIN_HOST:/rsrch5/scratch/epi/USER/isoqtl_pilot/bundle/
+"$CONDA_BIN" env create -p "$ISOQTL_HOME/env" -f environment.yml
+"$CONDA_BIN" run --no-capture-output -p "$ISOQTL_HOME/env" bash tools/install_r_source_packages.sh fetch "$ISOQTL_HOME/r_src"
+"$CONDA_BIN" run --no-capture-output -p "$ISOQTL_HOME/env" bash tools/install_r_source_packages.sh install "$ISOQTL_HOME/r_src"
 ```
 
-**On the cluster,** install from it in an interactive job:
+The last line printed should be `isotwas 2.0.0 loads`.
+
+### If compute nodes cannot reach the internet
+
+Build an **offline bundle** on any machine with internet access (a laptop is fine,
+macOS or Linux), copy it to the cluster, and install from it there. The bundle is
+about 1 GB and contains every package at a fixed version, so the environment is the
+same on every cluster.
+
+**On the machine with internet access:**
 
 ```bash
-bsub -Is -q short -n 2 -W 2:00 -M 16 -R "rusage[mem=16]" bash
+git clone https://github.com/nemani-aryun/isoQTL_sim.git && cd isoQTL_sim
+"${SHELL}" <(curl -L micro.mamba.pm/install.sh)      # micromamba, if you don't have it
+bash tools/make_offline_bundle.sh "$(which micromamba)" ./isoqtl_bundle
+```
 
-# Inside the interactive job, set these again if they aren't carried over:
-export PILOT=/rsrch5/scratch/epi/$USER/isoqtl_pilot
-export CONDA_BIN=/risapps/rhel8/miniforge3/24.5.0-0/bin/conda
-export CONDA_PKGS_DIRS=$PILOT/conda_pkgs
+It prints `478 packages downloaded` (or similar) and ends with the size of the
+bundle. Copy the `isoqtl_bundle` folder to `$ISOQTL_HOME/isoqtl_bundle` on the
+cluster with whatever transfer tool your cluster allows (`scp -r`, `rsync -a`, or an
+SFTP client such as FileZilla in binary mode). The installer checks every file, so
+an incomplete transfer is caught.
 
-bash "$PILOT/bundle/install_offline.sh" "$CONDA_BIN" "$PILOT/env"
+**On the cluster, in the interactive job:**
+
+```bash
+bash "$ISOQTL_HOME/isoqtl_bundle/install_offline.sh" "$CONDA_BIN" "$ISOQTL_HOME/env"
+```
+
+It prints `Bundle files verified` first (or names files that arrived incomplete:
+copy those again and rerun), installs the conda packages, then compiles seven R
+packages from source, and ends with `isotwas 2.0.0 loads`. Allow 15–30 minutes.
+
+### Check the environment
+
+```bash
 eval "$("$CONDA_BIN" shell.bash hook)"
-conda activate "$PILOT/env"
-```
-
-`-p` (used by the installer) keeps the environment beside the project, out of your home
-directory quota. Pipeline jobs don't need web access once this is installed.
-
-Check that it installed correctly. Every line should print a version, with no errors:
-
-```bash
-R --version | head -1
-python --version
+conda activate "$ISOQTL_HOME/env"
+R --version | head -1           # R 4.3.x
 salmon --version
-STAR --version
-plink2 --version | head -1
 tabix --version | head -1
-Rscript -e 'for (p in c("data.table","R.utils","yaml","corpcor","glmnet","rrBLUP","susieR","Rsubread","edgeR","tximport")) cat(p, as.character(packageVersion(p)), "\n")'
+Rscript -e 'for (p in c("data.table","glmnet","rrBLUP","susieR","Rsubread","tximport","isotwas")) cat(p, as.character(packageVersion(p)), "\n")'
 ```
 
-You should see R 4.3.x.
-
-## 4. Run the tests
+## 2. Run the tests
 
 Still in the interactive job with the environment active:
 
 ```bash
-cd "$PILOT/code"
+cd "$ISOQTL_HOME/isoQTL_sim"
 chmod +x bin/isoqtl-sim
-Rscript tests/test_sim_core.R
+Rscript tests/test_sim_core.R                           # ends with "All checks passed"
+bash tests/run_toy_e2e.sh "$ISOQTL_HOME/toy_test"       # ends with "End-to-end test passed"
+exit                                                    # leave the interactive job
 ```
 
-Expect `All checks passed`. This checks the simulation model against known math and
-takes about a minute.
+The second test takes a few minutes and runs every stage on synthetic data. Repeat
+both after updating the code, giving the second a new directory (it skips work it
+finds finished).
 
-Then run the pipeline on synthetic data, which takes a few minutes:
+## 3. Set up each login session
 
-```bash
-bash tests/run_toy_e2e.sh "$PILOT/toy_test"
-```
-
-Expect `End-to-end test passed`. If it fails, send the end of the output and the log it
-names, which will be under `$PILOT/toy_test/results/logs/`.
-
-Type `exit` to leave the interactive job.
-
-## 5. Configure and run the 100-gene pilot
-
-This pilot skips read simulation, so it needs far less compute and disk than a read-level run.
+These are lost when you log out; your jobs and results are not.
 
 ```bash
-export PILOT=/rsrch5/scratch/epi/$USER/isoqtl_pilot
-export CONDA_BIN=/risapps/rhel8/miniforge3/24.5.0-0/bin/conda
+export ISOQTL_HOME=/scratch/$USER/isoqtl CONDA_BIN=/path/to/conda
 eval "$("$CONDA_BIN" shell.bash hook)"
-conda activate "$PILOT/env"
-cd "$PILOT/code"
-
-cp config/pilot_lsf.yaml "$PILOT/pilot.yaml"
-sed -i "s/CHANGE_ME/$USER/g" "$PILOT/pilot.yaml"
+conda activate "$ISOQTL_HOME/env"
+cd "$ISOQTL_HOME/isoQTL_sim"
+export PATH="$PWD/bin:$PATH"
 ```
 
-Open `$PILOT/pilot.yaml` and check these four things:
+## 4. Configure the `lsf` block
 
-1. **`reference`:** the GTF and FASTA exist (`ls -l` each path).
-2. **`genotypes.vcf_template`:** this points to another user's directory. Check
-   you can read it with the command below. If it has moved or been purged, the VCFs need
-   regenerating, so tell me.
-3. **`chr_prefix`:** the check below prints chromosome names. Use `""` if you see `22`
-   and `"chr"` if you see `chr22`.
-4. **`lsf.queue_short` and `lsf.queue_long`:** these exist in `bqueues`, and the long
-   queue allows at least 12 hours.
+Start from `config/example.yaml` (or `config/example_full_lsf.yaml` for all genes,
+`config/example_reads_lsf.yaml` for a read-level run), fill in the data paths as in
+GETTING_STARTED, and set these ([CONFIG.md](CONFIG.md) has every field):
+
+```yaml
+lsf:
+  job_prefix: myrun            # job names start with this; one prefix per run
+  queue_short: short           # from `bqueues`; for stages of up to short_hours
+  queue_long: medium           # must allow the longest stage (see `plan`)
+  short_hours: 3
+  max_running: 200             # how many array jobs may run at once
+  max_array_size: 1000         # bparams -a | grep MAX_JOB_ARRAY_SIZE
+  mem_per_gb: 1                # 1024 if your cluster's bsub -M counts MB
+  container_exec: /path/to/conda run --no-capture-output -p /scratch/USER/isoqtl/env
+```
+
+`container_exec` is what makes each job run inside the environment without an
+activation step on the node; write both paths in full. With a container runtime
+instead, use `apptainer exec --bind /scratch /path/to/isoqtl-sim.sif` (see section 8).
+
+## 5. Prepare, submit, watch
+
+`prepare` reads the whole GTF, so run it in an interactive job:
 
 ```bash
-VCF=/rsrch9/home/epi/bhattacharya_lab/users/sthead/GTEx_gencode_comp/pass1/files_for_analysis/1KG_vcf/genos_1kg_eur_500_snps_maf_0.01_chr22.vcf.gz
-ls -l "$VCF" "$VCF.tbi"
-tabix -l "$VCF"
+bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" isoqtl-sim prepare --config my_run.yaml
+isoqtl-sim plan   --config my_run.yaml      # stages, job counts, memory and hours per job
+isoqtl-sim submit --config my_run.yaml      # writes <output_dir>/submit_lsf.sh
+cat  <output_dir>/submit_lsf.sh             # read it once: one bsub per stage
+bash <output_dir>/submit_lsf.sh
 ```
 
-Select the genes and samples, then generate the job script:
+Then:
 
 ```bash
-bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" \
-  python bin/isoqtl-sim prepare --config "$PILOT/pilot.yaml"
-
-python bin/isoqtl-sim plan --config "$PILOT/pilot.yaml"
-python bin/isoqtl-sim submit --config "$PILOT/pilot.yaml"
+bjobs -w                                    # your jobs; later stages show PEND until the previous one finishes
+isoqtl-sim status --config my_run.yaml      # finished jobs per stage, e.g. "train_truth  120/952"
+ls <output_dir>/logs/train_truth/           # one log per array job
+grep -lE "Exited with|TERM_" <output_dir>/logs/*/*.log    # logs of failed jobs
 ```
 
-Read the generated script, then submit it:
+**When a job fails,** the stages after it stay pending forever (they wait for
+`done(...)`). Read the failed log, fix the cause, remove the pending jobs with
+`bkill -J "myrun_*"`, and run the `bash <output_dir>/submit_lsf.sh` line again.
+Finished jobs have a marker in `<output_dir>/.done/` and are skipped; only the failed
+and pending work runs.
+
+## 6. Scaling to every gene
+
+With `n_genes: all` (about 19,000 genes for GENCODE v38):
+
+- **Array size.** `genes_per_job: 20` gives about 950 jobs per stage, under the usual
+  limit of 1,000. `submit` refuses a stage that exceeds `max_array_size` and says what
+  to change.
+- **Time per job.** Measured on one cluster core: about 22 s per univariate model
+  (a gene with M isoforms trains M + 1 models) and about 83 s per isoform for isoTWAS
+  with all eight methods. At 20 genes per job that is a median of roughly 1.5 hours
+  without isoTWAS and 5 hours with, with the longest jobs at about 3 and 11 hours.
+  Run a 100-gene pilot first, read `grep -h "Run time" <output_dir>/logs/train_truth/*.log`,
+  and scale by `genes_per_job / 15`.
+- **Queue limit.** The default request for `train` stages is 12 hours. Check
+  `bqueues -l <queue_long> | grep -A2 RUNLIMIT`, and raise or lower the request with
+  `resources: {train: {hours: 24}}` in the config.
+- **Disk.** Check `du -sh <output_dir>` after the pilot and multiply by
+  `n_genes / 100`. Read-level runs add the FASTQ files (two per sample) and Salmon
+  outputs; those dominate.
+- **Total compute.** About 1,100 CPU-hours for all genes without isoTWAS and about
+  4,600 with, before any read simulation.
+
+## 7. Recomputing only the summary
+
+If you change `summary.alpha`, or update the code in a way that affects only the
+summary step, keep the finished jobs and rerun the last step alone:
 
 ```bash
-cat "$PILOT/results/submit_lsf.sh"
-bash "$PILOT/results/submit_lsf.sh"
+cp -r <output_dir>/summary <output_dir>/summary_old
+bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" Rscript R/run_step.R summarize my_run.yaml 1
 ```
 
-## 6. Watch the jobs
+## 8. Using a container instead of conda
+
+If your cluster has Apptainer or Singularity (`module avail apptainer`) and you
+have built the Docker image (`docker build --platform linux/amd64 -t isoqtl-sim .`)
+and pushed it to a registry, convert it once:
 
 ```bash
-bjobs -w                                               # your jobs
-python bin/isoqtl-sim status --config "$PILOT/pilot.yaml"   # progress per stage
-ls "$PILOT/results/logs/"                              # one log per job
+apptainer pull isoqtl-sim.sif docker://REGISTRY/isoqtl-sim:latest
 ```
 
-**If a job fails:** later stages stay `PEND` because each one waits for the previous
-stage to succeed. Read the log, fix the cause, and remove the stuck jobs with
-`bkill -J "isoqtl_pilot_*"`. Then rerun the `bash` command from step 5. Finished work
-is skipped.
-
-## 7. Send back the results
-
-When everything is done:
-
-```bash
-column -t -s $'\t' "$PILOT/results/summary/power_summary.tsv"
-python bin/isoqtl-sim status --config "$PILOT/pilot.yaml"
-```
-
-Send me that output, plus the end of any failed log if something went wrong. To find
-failed logs: `grep -lE "Exited with|TERM_" "$PILOT"/results/logs/*/*.log`.
-
-Scratch may be purged, so copy the summary to your Mac (run this **on your Mac**):
-
-```bash
-rsync -av USER@CLUSTER_LOGIN_HOST:/rsrch5/scratch/epi/USER/isoqtl_pilot/results/summary/ ~/isoqtl_pilot_summary/
-```
-
-## 8. Update the code and start a new session
-
-Do this whenever the code changes on your Mac, and at the start of each login.
-
-**On your Mac,** copy the code again. Results and the environment are not touched:
-
-```bash
-cd ~/Library/CloudStorage/OneDrive-InsideMDAnderson/isoQTL_sim
-rsync -av --exclude .git ./ USER@CLUSTER_LOGIN_HOST:/rsrch5/scratch/epi/USER/isoqtl_pilot/code/
-```
-
-**On the cluster,** set up the session. These settings are lost when you log out; the
-jobs and their results are not:
-
-```bash
-export PILOT=/rsrch5/scratch/epi/$USER/isoqtl_pilot
-export CONDA_BIN=/risapps/rhel8/miniforge3/24.5.0-0/bin/conda
-eval "$("$CONDA_BIN" shell.bash hook)"
-conda activate "$PILOT/env"
-cd "$PILOT/code"
-```
-
-After a code change, repeat the two tests from step 4 in an interactive job. Give the
-second one a new directory, because it skips work it finds already finished:
-
-```bash
-bsub -Is -q short -n 4 -W 1:00 -M 16 -R "rusage[mem=16]" bash
-# then set up the session again as above
-Rscript tests/test_sim_core.R
-bash tests/run_toy_e2e.sh "$PILOT/toy_test_$(date +%Y%m%d)"
-exit
-```
-
-## 9. Full run on simulated expression
-
-This simulates every protein-coding autosomal gene (about 19,000) under nine trait
-scenarios, without reads. Each run needs its own `output_dir`; the config sets
-`results_full_truth`, so the pilot's results are kept.
-
-```bash
-cp config/full_truth_lsf.yaml "$PILOT/full_truth.yaml"
-sed -i "s/CHANGE_ME/$USER/g" "$PILOT/full_truth.yaml"
-grep chr_prefix "$PILOT/pilot.yaml" "$PILOT/full_truth.yaml"    # make these match
-```
-
-Check two things before submitting:
-
-1. **Disk.** Run `du -sh "$PILOT/results/simulated"` for the pilot. The full run needs
-   about 190 times that, up to double with the extra scenarios. Compare it with
-   `df -h /rsrch5/scratch`.
-2. **Time.** `grep -h "Run time" "$PILOT"/results/logs/train_truth/*.log` shows what 15
-   genes took in the pilot. The full run has 25 genes per job and a 12-hour limit. If
-   the pilot's jobs took more than 6 hours, raise the limit with the `resources`
-   block in the config.
-
-Then prepare, review and submit as in step 5:
-
-```bash
-bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" \
-  python bin/isoqtl-sim prepare --config "$PILOT/full_truth.yaml"
-
-python bin/isoqtl-sim plan --config "$PILOT/full_truth.yaml"
-python bin/isoqtl-sim submit --config "$PILOT/full_truth.yaml"
-cat "$PILOT/results_full_truth/submit_lsf.sh"
-bash "$PILOT/results_full_truth/submit_lsf.sh"
-```
-
-Expect `plan` to show about 760 jobs each for `simulate` and `train_truth`. Watch
-progress as in step 6, with `--config "$PILOT/full_truth.yaml"` and logs under
-`$PILOT/results_full_truth/logs/`. To remove stuck jobs, use `bkill -J "isoqtl_full_*"`.
-
-When it finishes, send me:
-
-```bash
-column -t -s $'\t' "$PILOT/results_full_truth/summary/power_summary.tsv"
-tail -5 "$PILOT/results_full_truth/logs/summarize/1.log"
-```
-
-**Reading the summary.** `rejection_rate` is the share of simulated genes with
-p < 0.05, and `rejection_rate_bonferroni` uses 0.05 divided by the number of simulated
-genes. In the `null` scenario the first should be near 0.05. Genes with too few SNPs
-to simulate are counted in `n_genes_not_simulated` and left out of both rates. A
-single-isoform gene's isoform test is its gene test, so both levels cover the same
-genes. A trained model whose weights are all zero predicts nothing, so it is not
-tested; a gene with no other model at that level drops out of `n_genes_modeled` and
-counts as a miss. `gene_tests.tsv.gz` has one row per gene, level and scenario, with
-`n_isoforms`, for comparing the levels on multi-isoform genes only.
-
-**Recomputing a summary.** After a code update that changes only the summary, there is
-no need to rerun the jobs. Keep the old summary and run the summary step directly:
-
-```bash
-cp -r "$PILOT/results_full_truth/summary" "$PILOT/results_full_truth/summary_old"
-bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" \
-  Rscript R/run_step.R summarize "$PILOT/full_truth.yaml" 1
-```
-
-## 10. Read-level pilot
-
-This simulates reads for 100 genes in every sample, quantifies them with Salmon, and
-repeats the TWAS on Salmon's estimates beside the true expression. It can run at the
-same time as step 9.
-
-```bash
-cp config/reads_pilot_lsf.yaml "$PILOT/reads_pilot.yaml"
-sed -i "s/CHANGE_ME/$USER/g" "$PILOT/reads_pilot.yaml"
-grep chr_prefix "$PILOT/pilot.yaml" "$PILOT/reads_pilot.yaml"   # make these match
-
-bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" \
-  python bin/isoqtl-sim prepare --config "$PILOT/reads_pilot.yaml"
-
-python bin/isoqtl-sim plan --config "$PILOT/reads_pilot.yaml"
-python bin/isoqtl-sim submit --config "$PILOT/reads_pilot.yaml"
-cat "$PILOT/results_reads_pilot/submit_lsf.sh"
-bash "$PILOT/results_reads_pilot/submit_lsf.sh"
-```
-
-Expect these stages, with one job per sample for `reads` and `salmon_gencode_v38`:
-
-```
-simulate, truth_matrix, reads, salmon_index_gencode_v38, salmon_gencode_v38,
-aggregate_salmon_gencode_v38, train_truth, train_salmon_gencode_v38, summarize
-```
-
-The Salmon index is built once from the transcript FASTA and takes the longest of the
-single jobs. To remove stuck jobs, use `bkill -J "isoqtl_reads_*"`. When it finishes,
-send me:
-
-```bash
-column -t -s $'\t' "$PILOT/results_reads_pilot/summary/power_summary.tsv"
-python bin/isoqtl-sim status --config "$PILOT/reads_pilot.yaml"
-```
-
-The summary has `truth` rows and `salmon_gencode_v38` rows for the same genes. The gap
-between them is what quantification costs.
-
-## 11. isoTWAS models
-
-This adds isoTWAS training from the [isotwas](https://github.com/bhattacharya-a-bt/isotwas)
-package: the isoforms of a gene are modeled jointly by several methods and the best
-is kept per isoform. Results appear as a third level, `isotwas_acat`, beside `gene`
-and `isoform_acat` (univariate isoform models).
-
-isotwas needs more R packages, so it gets a new environment, `env_isotwas`. The old
-environment and its results are untouched.
-
-**On your Mac,** copy the code and the new bundle (about 1 GB). To rebuild the bundle,
-run `tools/make_offline_bundle.sh MICROMAMBA_BIN ~/isoqtl_bundle`.
-
-```bash
-cd ~/Library/CloudStorage/OneDrive-InsideMDAnderson/isoQTL_sim
-rsync -av --exclude .git ./ USER@CLUSTER_LOGIN_HOST:/rsrch5/scratch/epi/USER/isoqtl_pilot/code/
-rsync -av ~/isoqtl_bundle/ USER@CLUSTER_LOGIN_HOST:/rsrch5/scratch/epi/USER/isoqtl_pilot/isoqtl_bundle/
-```
-
-**On the cluster,** install and test in an interactive job:
-
-```bash
-bsub -Is -q short -n 4 -W 2:00 -M 16 -R "rusage[mem=16]" bash
-
-export PILOT=/rsrch5/scratch/epi/$USER/isoqtl_pilot
-export CONDA_BIN=/risapps/rhel8/miniforge3/24.5.0-0/bin/conda
-export CONDA_PKGS_DIRS=$PILOT/conda_pkgs
-bash "$PILOT/isoqtl_bundle/install_offline.sh" "$CONDA_BIN" "$PILOT/env_isotwas"
-```
-
-It first prints `Bundle files verified`, or names the files to copy again. The last
-line should be `isotwas 2.0.0 loads`. Seven packages are compiled or installed
-from source here; if one fails, the script prints the end of its log. Send me that.
-
-Still in the interactive job, test the new environment:
-
-```bash
-eval "$("$CONDA_BIN" shell.bash hook)"
-conda activate "$PILOT/env_isotwas"
-cd "$PILOT/code"
-Rscript tests/test_sim_core.R
-bash tests/run_toy_e2e.sh "$PILOT/toy_test_isotwas"
-exit
-```
-
-Expect `All checks passed` and `End-to-end test passed`.
-
-**Pilot first.** Back on the login node, with `env_isotwas` active (set up the session
-as in step 8, but activate `"$PILOT/env_isotwas"`):
-
-```bash
-cp config/isotwas_pilot_lsf.yaml "$PILOT/isotwas_pilot.yaml"
-sed -i "s/CHANGE_ME/$USER/g" "$PILOT/isotwas_pilot.yaml"
-grep chr_prefix "$PILOT/pilot.yaml" "$PILOT/isotwas_pilot.yaml"    # make these match
-
-bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" \
-  python bin/isoqtl-sim prepare --config "$PILOT/isotwas_pilot.yaml"
-python bin/isoqtl-sim submit --config "$PILOT/isotwas_pilot.yaml"
-bash "$PILOT/results_isotwas_pilot/submit_lsf.sh"
-```
-
-It uses the same 100 genes as the first pilot. When it finishes, send me:
-
-```bash
-column -t -s $'\t' "$PILOT/results_isotwas_pilot/summary/power_summary.tsv"
-grep -h "Run time" "$PILOT"/results_isotwas_pilot/logs/train_truth/*.log
-grep -h "isotwas" "$PILOT"/results_isotwas_pilot/logs/train_truth/*.log | sort | uniq -c
-```
-
-The run times decide the settings for the full run. From a Mac benchmark, isoTWAS
-training should take about three times as long as the univariate models, which would
-make the pilot's jobs 2 to 8 hours.
-
-**Full run.** `config/full_isotwas_lsf.yaml` runs every gene, 20 per job, with a
-24-hour limit for training. Check that the long queue allows 24 hours
-(`bqueues -l medium | grep -A2 RUNLIMIT`), then:
-
-```bash
-cp config/full_isotwas_lsf.yaml "$PILOT/full_isotwas.yaml"
-sed -i "s/CHANGE_ME/$USER/g" "$PILOT/full_isotwas.yaml"
-grep chr_prefix "$PILOT/pilot.yaml" "$PILOT/full_isotwas.yaml"     # make these match
-
-bsub -Is -q short -n 1 -W 1:00 -M 16 -R "rusage[mem=16]" \
-  python bin/isoqtl-sim prepare --config "$PILOT/full_isotwas.yaml"
-python bin/isoqtl-sim plan --config "$PILOT/full_isotwas.yaml"
-python bin/isoqtl-sim submit --config "$PILOT/full_isotwas.yaml"
-bash "$PILOT/results_full_isotwas/submit_lsf.sh"
-```
-
-It repeats the simulation and the univariate models of step 9 with the same seed, so
-its `gene` and `isoform_acat` rows should match step 9's closely.
+and set `container_exec: apptainer exec --bind /scratch,/data /path/to/isoqtl-sim.sif`
+with every filesystem your config refers to in `--bind`. No conda environment is
+needed then. The image build itself has not yet been exercised by the authors.
 
 ## Troubleshooting
 
 | What you see | Likely cause | What to do |
 |---|---|---|
-| `conda: command not found` in a job | Wrong conda path in `container_exec` | Set the full path in `pilot.yaml` |
-| `Disk quota exceeded` during install | Conda cache in your home directory | Check `CONDA_PKGS_DIRS` is set as in step 3 and retry |
-| Connection or `PackagesNotFoundError` errors during install | Conda is trying the web or can't find a bundle file | Confirm `--offline` is in `install_offline.sh` and `bundle/pkgs` copied fully, then send me the error |
-| `An error occurred while installing package ... bioconductor-genomeinfodbdata` | A bundle built before `r_data/` existed: that package downloads its content during install | Upload the current bundle's `explicit.txt`, `install_offline.sh` and `r_data` folder, delete the half-built environment folder, and rerun the install |
-| Job killed with `TERM_MEMLIMIT` | Not enough memory requested | Raise `mem_gb` for that stage in the config's `resources` block, then run `submit` again |
-| Job killed with `TERM_RUNLIMIT` | Not enough time, or the queue limit is too short | Raise `hours` for that stage in `resources`, or change the queue |
-| `These settings changed since prepare ran` | The config was edited after `prepare`; finished jobs would keep the old settings | Set a new `output_dir` and run `prepare` again. Queue, `threads` and `resources` changes are always allowed |
-| `needs N array jobs, above the limit` | More array jobs than LSF allows in one array | Follow the message: raise `genes_per_job`, then `prepare` again in a new or emptied `output_dir` |
-| `Bad resource requirement syntax` or jobs pending on memory | The cluster counts memory in MB, not GB | Set `lsf.mem_per_gb: 1024` |
-| `Samples missing from VCF` | Sample file doesn't match the VCF | Check `genotypes.sample_file` |
-| All genes report `no_snps` | Wrong `chr_prefix` | Recheck with `tabix -l` |
-
-## Using a container instead (optional)
-
-The `Dockerfile` hasn't been built yet because the Mac used for development has no
-Docker. Once it's been built and pushed to a registry, and if the cluster has Apptainer
-(check with `module avail apptainer`), you can replace the conda line in `pilot.yaml`:
-
-```yaml
-container_exec: apptainer exec --bind /rsrch5,/rsrch9 /path/to/isoqtl-sim.sif
-```
+| `conda: command not found` inside a job log | `container_exec` has a relative or wrong conda path | Use the full path printed by `which conda` on the login node |
+| `Disk quota exceeded` during install | Conda cache in your home directory | `export CONDA_PKGS_DIRS=$ISOQTL_HOME/conda_pkgs` and retry |
+| `Failed to connect`, `CondaHTTPError`, or `post-link script failed` during install | The node has no internet access | Use the offline bundle (section 1). A bundle built by the current `make_offline_bundle.sh` needs no downloads at all |
+| `These bundle files are missing or incomplete` | Transfer dropped or truncated files | Copy the listed files again, rerun the installer |
+| Job killed with `TERM_MEMLIMIT` | Not enough memory requested | Add `resources: {<stage>: {mem_gb: 32}}` and submit again |
+| Job killed with `TERM_RUNLIMIT` | Not enough time, or the queue's limit is lower than the request | Raise `hours` in `resources`, or use a queue with a longer limit |
+| Jobs pend with "memory" or "resource requirement" errors | LSF counts memory in MB on this cluster | `lsf: {mem_per_gb: 1024}` |
+| `needs N array jobs, above the limit` | More jobs than one array may hold | Raise `genes_per_job` and run `prepare` into a new `output_dir` |
+| `These settings changed since prepare ran` | Config edited after `prepare` | Use a new `output_dir`; `lsf`, `threads` and `resources` changes are always allowed |
+| Every gene has status `no_snps` | Wrong `chr_prefix` or `vcf_template` | Compare `tabix -l` output with `chr_prefix` |
+| `Samples missing from VCF` | `sample_file` IDs not in the VCF header | Fix the sample file or remove the setting |
+| Later stages `PEND` forever | An earlier job failed | Section 5: read the log, `bkill -J "<prefix>_*"`, fix, resubmit |
