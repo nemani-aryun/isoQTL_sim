@@ -1,5 +1,14 @@
 # Setting up isoQTL_sim on the LSF cluster
 
+> **Who this is for.** This is the worked, step-by-step record of installing and
+> running isoQTL_sim on one LSF cluster (MD Anderson's) whose nodes have no internet
+> access, written for the person running it there. Queue names, the conda path and
+> the data paths are that cluster's; replace them with yours. The generic
+> instructions are in [../GETTING_STARTED.md](../GETTING_STARTED.md), and every
+> setting is explained in [CONFIG.md](CONFIG.md). The route that matters for other
+> clusters without internet is step 3 (build a bundle elsewhere, install offline)
+> and step 11 (the same for the environment with isoTWAS).
+
 This guide creates a conda environment on the cluster, tests it, then runs a
 100-gene pilot (steps 1 to 7), the full run on simulated expression (step 9) and a
 read-level pilot (step 10). Allow about an hour for steps 1 to 5, most of it waiting
